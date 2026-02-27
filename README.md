@@ -1,42 +1,44 @@
 ![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
 
-# Tiny Tapeout Verilog Project Template
+# SNN Motion Detector + Ascon-128 AEAD
 
 - [Read the documentation for project](docs/info.md)
+
+## Overview
+
+Neuromorphic motion detection with NIST Ascon-128 authenticated encryption for secure IoT edge sensing. Part of the UrbanSense-AI multi-paradigm neural processing SoC project.
+
+**Target:** TinyTapeout IHP 26a (IHP SG13G2 130nm)
+**Tiles:** 8x2 (16 tiles, ~15K cells)
+
+## Modules
+
+### SNN Motion Detector (Mode 0)
+- Leaky Integrate-and-Fire (LIF) neurons for event-driven motion detection
+- 16x16 pixel input, 4x4 spatial grid aggregation
+- Outputs: motion_detected flag + motion_intensity[7:0]
+
+### Ascon-128 AEAD (Mode 1)
+- NIST Lightweight Cryptography standard (2023)
+- 128-bit key, 128-bit nonce, 64-bit data blocks
+- Authenticated encryption and decryption with 128-bit tag
+
+## Pin Mapping
+
+| Pin | Direction | Function |
+|-----|-----------|----------|
+| `ui_in[7:0]` | Input | Data (pixel or crypto) |
+| `uo_out[7:0]` | Output | Result (motion info or ciphertext) |
+| `uio[7]` | Input | Mode: 0=SNN, 1=Ascon |
+| `uio[6:5]` | Input | Command |
+| `uio[4]` | Input | Data last (Ascon) |
+| `uio[3]` | Input | Start (Ascon) |
+| `uio[2]` | Input | Decrypt select |
+| `uio[1]` | Output | Output valid |
+| `uio[0]` | Output | Status |
 
 ## What is Tiny Tapeout?
 
 Tiny Tapeout is an educational project that aims to make it easier and cheaper than ever to get your digital and analog designs manufactured on a real chip.
 
 To learn more and get started, visit https://tinytapeout.com.
-
-## Set up your Verilog project
-
-1. Add your Verilog files to the `src` folder.
-2. Edit the [info.yaml](info.yaml) and update information about your project, paying special attention to the `source_files` and `top_module` properties. If you are upgrading an existing Tiny Tapeout project, check out our [online info.yaml migration tool](https://tinytapeout.github.io/tt-yaml-upgrade-tool/).
-3. Edit [docs/info.md](docs/info.md) and add a description of your project.
-4. Adapt the testbench to your design. See [test/README.md](test/README.md) for more information.
-
-The GitHub action will automatically build the ASIC files using [LibreLane](https://www.zerotoasiccourse.com/terminology/librelane/).
-
-## Enable GitHub actions to build the results page
-
-- [Enabling GitHub Pages](https://tinytapeout.com/faq/#my-github-action-is-failing-on-the-pages-part)
-
-## Resources
-
-- [FAQ](https://tinytapeout.com/faq/)
-- [Digital design lessons](https://tinytapeout.com/digital_design/)
-- [Learn how semiconductors work](https://tinytapeout.com/siliwiz/)
-- [Join the community](https://tinytapeout.com/discord)
-- [Build your design locally](https://www.tinytapeout.com/guides/local-hardening/)
-
-## What next?
-
-- [Submit your design to the next shuttle](https://app.tinytapeout.com/).
-- Edit [this README](README.md) and explain your design, how it works, and how to test it.
-- Share your project on your social network of choice:
-  - LinkedIn [#tinytapeout](https://www.linkedin.com/search/results/content/?keywords=%23tinytapeout) [@TinyTapeout](https://www.linkedin.com/company/100708654/)
-  - Mastodon [#tinytapeout](https://chaos.social/tags/tinytapeout) [@matthewvenn](https://chaos.social/@matthewvenn)
-  - X (formerly Twitter) [#tinytapeout](https://twitter.com/hashtag/tinytapeout) [@tinytapeout](https://twitter.com/tinytapeout)
-  - Bluesky [@tinytapeout.com](https://bsky.app/profile/tinytapeout.com)
