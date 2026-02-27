@@ -1,14 +1,14 @@
 # Tiny Tapeout project information
 project:
-  title:        "SNN Motion Detector + Ascon-128 AEAD"
+  title:        "Ascon-128 AEAD Encryption"
   author:       "Hai Ha (haiha-ux)"
   discord:      ""
-  description:  "Neuromorphic motion detection with NIST Ascon-128 authenticated encryption for secure IoT edge sensing"
+  description:  "NIST Ascon-128 authenticated encryption (encrypt-only) for lightweight IoT security"
   language:     "SystemVerilog"
   clock_hz:     5000000        # 5 MHz (config.json CLOCK_PERIOD=200ns)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
-  tiles: "4x2"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
+  tiles: "2x2"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
   top_module:  "tt_um_snn_ascon"
@@ -18,7 +18,6 @@ project:
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
     - "tt_um_snn_ascon.sv"
-    - "ascon_aead.sv"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
@@ -47,7 +46,7 @@ pinout:
   uio[0]: "busy (output)"
   uio[1]: "output_valid (output)"
   uio[2]: "read_ack"
-  uio[3]: "decrypt_sel"
+  uio[3]: ""
   uio[4]: "start_pulse"
   uio[5]: "data_last"
   uio[6]: "cmd[0]"

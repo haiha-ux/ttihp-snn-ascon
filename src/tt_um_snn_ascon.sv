@@ -1,35 +1,40 @@
 // ============================================================================
-// TinyTapeout Wrapper: Ascon-128 AEAD (Encrypt-Only, Area-Optimized)
+// TinyTapeout Ascon-128 AEAD — Merged Ultra-Compact (2x2 Target)
 // ============================================================================
-// Target: TinyTapeout IHP 26a (IHP SG13G2 130nm)
+// Target: TinyTapeout IHP 26a (IHP SG13G2 130nm), 2x2 tiles
 // Author: UrbanSense-AI Project
 //
 // Description:
-//   Ascon-128 authenticated encryption with serial I/O interface.
-//   Area optimizations:
-//   - Encrypt-only (no decrypt support)
-//   - nonce_sr reused as tag shift register after initialization
-//   - No key_reg in AEAD core (key_sr stays stable during operation)
+//   Ascon-128 authenticated encryption, fully merged (no submodules).
+//   All register sharing optimizations for minimal area:
+//   - No nonce_sr: nonce loaded directly into x3/x4
+//   - No separate data_sr/out_sr/pending_output: single io_sr
+//   - No key_reg in AEAD: reads key_sr directly
+//   - Encrypt-only (no decrypt)
+//   - 2-phase permutation (S-box + diffusion split)
+//   - Sequential protocol: MCU reads CT before sending next PT block
+//
+//   Register budget: ~537 FFs (vs ~860 in previous design)
 //
 // Pin Mapping:
 //   ui_in[7:0]   = Data input (8 bits at a time)
 //   uo_out[7:0]  = Data output (ciphertext or tag bytes)
-//   uio[7:6]     = CMD (input): 00=idle, 01=load_key, 10=load_nonce, 11=process
-//   uio[5]       = DATA_LAST (input): marks last data block
-//   uio[4]       = START (input): pulse to start encrypt
-//   uio[3]       = (unused, was decrypt_sel)
-//   uio[2]       = READ_ACK (input): pulse to advance to next output byte
-//   uio[1]       = OUTPUT_VALID (output): data output ready to read
-//   uio[0]       = BUSY (output): Ascon is processing
+//   uio[7:6]     = CMD: 00=idle, 01=load_key, 10=load_nonce, 11=send_data
+//   uio[5]       = DATA_LAST: marks last data block (sampled on 8th byte)
+//   uio[4]       = START: pulse to begin encryption
+//   uio[2]       = READ_ACK: pulse to advance to next output byte
+//   uio[1]       = OUTPUT_VALID (output): byte ready to read
+//   uio[0]       = BUSY (output): encryption in progress
 //
-// Protocol:
-//   1. Load 128-bit key: 16 bytes with cmd=01, MSB first
-//   2. Load 128-bit nonce: 16 bytes with cmd=10, MSB first
-//   3. Pulse start (uio[4]=1) for 1 cycle
-//   4. Process data: send 8-byte blocks with cmd=11, set data_last on final
-//   5. Poll output_valid (uio[1]). When high, read uo_out, pulse read_ack (uio[2])
-//   6. Repeat step 5 for all ciphertext bytes + 16 tag bytes
-//   NOTE: nonce must be reloaded before each new encryption
+// Sequential Protocol:
+//   1. Load key:   16 bytes with cmd=01, MSB first
+//   2. Load nonce: 16 bytes with cmd=10, MSB first (→ x3, x4 directly)
+//   3. Pulse start (uio[4]=1)
+//   4. For each 8-byte block:
+//      a. Send 8 PT bytes with cmd=11. Set data_last=1 on final block.
+//      b. Wait for output_valid. Read 8 CT bytes with read_ack.
+//   5. Read 16 tag bytes (8 tag_hi + 8 tag_lo) with read_ack.
+//   NOTE: Must reload nonce before each encryption (x3/x4 are modified).
 // ============================================================================
 
 `default_nettype none
@@ -40,196 +45,307 @@ module tt_um_snn_ascon (
     output wire [7:0] uo_out,   // Dedicated outputs
     input  wire [7:0] uio_in,   // IOs: Input path
     output wire [7:0] uio_out,  // IOs: Output path
-    output wire [7:0] uio_oe,   // IOs: Enable path (active high: 0=input, 1=output)
-    input  wire       ena,      // always 1 when the design is powered
-    input  wire       clk,      // clock
-    input  wire       rst_n     // reset_n - low to reset
+    output wire [7:0] uio_oe,   // IOs: Enable path
+    input  wire       ena,      // always 1 when powered
+    input  wire       clk,
+    input  wire       rst_n
 );
 
     // ========================================================================
     // Pin Decode
     // ========================================================================
-    wire [1:0] cmd        = uio_in[7:6]; // Command
-    wire       data_last  = uio_in[5];   // Last data block
-    wire       start_pulse= uio_in[4];   // Start encrypt
-    wire       read_ack   = uio_in[2];   // MCU pulses to read next output byte
+    wire [1:0] cmd         = uio_in[7:6];
+    wire       data_last   = uio_in[5];
+    wire       start_pulse = uio_in[4];
+    wire       read_ack    = uio_in[2];
 
-    // uio direction: [7:2]=input, [1:0]=output
+    // [1:0] = output (output_valid, busy), [7:2] = input
     assign uio_oe = 8'b0000_0011;
 
     // ========================================================================
-    // Ascon-128 Serial Interface
+    // Constants
     // ========================================================================
-    reg [127:0] key_sr;
-    reg [127:0] nonce_sr;     // Also used as tag shift register after init
-    reg [63:0]  data_sr;
-    reg [3:0]   byte_cnt;
-    reg         ascon_start_enc;
-
-    // Ascon data input handshake
-    reg         ascon_data_valid;
-    reg         ascon_data_last;
-    wire        ascon_data_ready;
-
-    // Ascon data output
-    wire        ascon_out_valid;
-    wire [63:0] ascon_out_data;
-    wire        ascon_out_last;
-    reg         ascon_out_ready;
-
-    // Ascon status
-    wire        ascon_busy;
-    wire [127:0] ascon_tag_out;
-    wire        ascon_tag_valid;
-
-    // Output shift register (64-bit -> 8-bit serialization)
-    reg [63:0]  out_sr;
-    reg [3:0]   out_byte_cnt;
-    reg         out_valid;
-
-    // Tag output (reuses nonce_sr)
-    reg [4:0]   tag_byte_cnt;
-    reg         tag_phase;
-    reg         tag_pending;  // Tag captured but waiting for CT output to finish
-
-    ascon_aead u_ascon (
-        .clk(clk),
-        .rst_n(rst_n),
-        .start_encrypt(ascon_start_enc),
-        .key(key_sr),
-        .nonce(nonce_sr),
-        .s_axis_tvalid(ascon_data_valid),
-        .s_axis_tready(ascon_data_ready),
-        .s_axis_tdata(data_sr),
-        .s_axis_tlast(ascon_data_last),
-        .m_axis_tvalid(ascon_out_valid),
-        .m_axis_tready(ascon_out_ready),
-        .m_axis_tdata(ascon_out_data),
-        .m_axis_tlast(ascon_out_last),
-        .tag_out(ascon_tag_out),
-        .tag_valid(ascon_tag_valid),
-        .busy(ascon_busy)
-    );
+    localparam [63:0] IV_ASCON128 = 64'h80400c0600000000;
 
     // ========================================================================
-    // Serial Protocol FSM
+    // FSM States (3-bit, 8 states)
+    // ========================================================================
+    localparam [2:0] ST_IDLE      = 3'd0;  // Accept key/nonce, wait for start
+    localparam [2:0] ST_PERM      = 3'd1;  // 2-phase permutation
+    localparam [2:0] ST_INIT_XOR  = 3'd2;  // Post-init key XOR + domain sep
+    localparam [2:0] ST_WAIT_DATA = 3'd3;  // Accept PT bytes from MCU
+    localparam [2:0] ST_ENCRYPT   = 3'd4;  // XOR: CT=x0^PT, output CT
+    localparam [2:0] ST_WAIT_READ = 3'd5;  // Wait for MCU to read all CT bytes
+    localparam [2:0] ST_TAG_HI    = 3'd6;  // Output tag[127:64]
+    localparam [2:0] ST_TAG_LO    = 3'd7;  // Output tag[63:0]
+
+    // ========================================================================
+    // Registers (~537 FFs total)
+    // ========================================================================
+    reg [2:0]   fsm_state;              // 3  — current state
+    reg [2:0]   after_perm;             // 3  — return state after perm
+    reg [63:0]  x0, x1, x2, x3, x4;    // 320 — Ascon state
+    reg [127:0] key_sr;                 // 128 — key shift register
+    reg [63:0]  io_sr;                  // 64  — shared I/O shift register
+    reg [3:0]   byte_cnt;              // 4   — byte counter (nonce/data)
+    reg [3:0]   out_byte_cnt;          // 4   — output byte counter
+    reg [3:0]   round_cnt;             // 4   — permutation round counter
+    reg         perm_phase;            // 1   — 0=S-box, 1=diffusion
+    reg         last_block;            // 1   — last data block flag
+    reg         out_valid;             // 1   — output byte ready
+    reg         busy;                  // 1   — encryption in progress
+
+    // ========================================================================
+    // Round Constant (combinational)
+    // ========================================================================
+    reg [7:0] round_const;
+    always @(*) begin
+        case (round_cnt)
+            4'd0:  round_const = 8'hf0;
+            4'd1:  round_const = 8'he1;
+            4'd2:  round_const = 8'hd2;
+            4'd3:  round_const = 8'hc3;
+            4'd4:  round_const = 8'hb4;
+            4'd5:  round_const = 8'ha5;
+            4'd6:  round_const = 8'h96;
+            4'd7:  round_const = 8'h87;
+            4'd8:  round_const = 8'h78;
+            4'd9:  round_const = 8'h69;
+            4'd10: round_const = 8'h5a;
+            4'd11: round_const = 8'h4b;
+            default: round_const = 8'hf0;
+        endcase
+    end
+
+    // ========================================================================
+    // Phase 0: S-box (Substitution) — Combinational
+    // ========================================================================
+    wire [63:0] c2 = x2 ^ {56'b0, round_const};
+
+    wire [63:0] t0 = x0 ^ x4;
+    wire [63:0] t1 = x1;
+    wire [63:0] t2 = c2 ^ x1;
+    wire [63:0] t3 = x3;
+    wire [63:0] t4 = x4 ^ x3;
+
+    wire [63:0] chi0 = t0 ^ ((~t1) & t2);
+    wire [63:0] chi1 = t1 ^ ((~t2) & t3);
+    wire [63:0] chi2 = t2 ^ ((~t3) & t4);
+    wire [63:0] chi3 = t3 ^ ((~t4) & t0);
+    wire [63:0] chi4 = t4 ^ ((~t0) & t1);
+
+    wire [63:0] s0 = chi0 ^ chi4;
+    wire [63:0] s1 = chi1 ^ chi0;
+    wire [63:0] s2 = ~chi2;
+    wire [63:0] s3 = chi3 ^ chi2;
+    wire [63:0] s4 = chi4;
+
+    // ========================================================================
+    // Phase 1: Linear Diffusion — Combinational
+    // ========================================================================
+    wire [63:0] d0 = x0 ^ {x0[18:0], x0[63:19]} ^ {x0[27:0], x0[63:28]};
+    wire [63:0] d1 = x1 ^ {x1[60:0], x1[63:61]} ^ {x1[38:0], x1[63:39]};
+    wire [63:0] d2 = x2 ^ {x2[0],    x2[63:1]}  ^ {x2[5:0],  x2[63:6]};
+    wire [63:0] d3 = x3 ^ {x3[9:0],  x3[63:10]} ^ {x3[16:0], x3[63:17]};
+    wire [63:0] d4 = x4 ^ {x4[6:0],  x4[63:7]}  ^ {x4[40:0], x4[63:41]};
+
+    // ========================================================================
+    // Output Mux
+    // ========================================================================
+    assign uo_out  = out_valid ? io_sr[63:56] : 8'd0;
+    assign uio_out = {6'b000000, out_valid, busy};
+
+    // ========================================================================
+    // Main FSM + Independent Read Mechanism
     // ========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            key_sr          <= 128'd0;
-            nonce_sr        <= 128'd0;
-            data_sr         <= 64'd0;
-            byte_cnt        <= 4'd0;
-            ascon_start_enc <= 1'b0;
-            ascon_data_valid <= 1'b0;
-            ascon_data_last  <= 1'b0;
-            ascon_out_ready  <= 1'b0;
-            out_sr          <= 64'd0;
-            out_byte_cnt    <= 4'd0;
-            out_valid       <= 1'b0;
-            tag_byte_cnt    <= 5'd0;
-            tag_phase       <= 1'b0;
-            tag_pending     <= 1'b0;
+            fsm_state    <= ST_IDLE;
+            after_perm   <= ST_IDLE;
+            x0 <= 64'd0; x1 <= 64'd0; x2 <= 64'd0; x3 <= 64'd0; x4 <= 64'd0;
+            key_sr       <= 128'd0;
+            io_sr        <= 64'd0;
+            byte_cnt     <= 4'd0;
+            out_byte_cnt <= 4'd0;
+            round_cnt    <= 4'd0;
+            perm_phase   <= 1'b0;
+            last_block   <= 1'b0;
+            out_valid    <= 1'b0;
+            busy         <= 1'b0;
+
         end else begin
-            // Clear single-cycle pulses
-            ascon_start_enc <= 1'b0;
 
-            // Clear data valid after handshake
-            if (ascon_data_valid && ascon_data_ready) begin
-                ascon_data_valid <= 1'b0;
-                ascon_data_last  <= 1'b0;
-            end
-
-            // Capture tag into nonce_sr when valid (nonce no longer needed)
-            if (ascon_tag_valid) begin
-                nonce_sr <= ascon_tag_out;
-                tag_byte_cnt <= 5'd16;
-                if (!out_valid)
-                    tag_phase <= 1'b1;
-                else
-                    tag_pending <= 1'b1;
-            end
-
-            // Start tag output once CT output is fully read
-            if (tag_pending && !out_valid) begin
-                tag_phase <= 1'b1;
-                tag_pending <= 1'b0;
-            end
-
-            // Output serialization: capture 64-bit output (hold until MCU reads)
-            if (ascon_out_valid && !out_valid && !tag_phase) begin
-                out_sr <= ascon_out_data;
-                out_byte_cnt <= 4'd8;
-                out_valid <= 1'b1;
-                ascon_out_ready <= 1'b1;
-            end else begin
-                ascon_out_ready <= 1'b0;
-            end
-
-            // Advance to next output byte only when MCU pulses read_ack
-            if (out_valid && out_byte_cnt > 0 && read_ack && !tag_phase) begin
+            // ============================================================
+            // Independent: MCU read mechanism (byte-by-byte from io_sr)
+            // Runs in any FSM state. Mutually exclusive with FSM writes
+            // to io_sr because FSM only writes io_sr when out_valid==0.
+            // ============================================================
+            if (out_valid && read_ack && out_byte_cnt > 0) begin
+                io_sr <= {io_sr[55:0], 8'd0};
                 out_byte_cnt <= out_byte_cnt - 1;
-                if (out_byte_cnt == 1) out_valid <= 1'b0;
-                out_sr <= {out_sr[55:0], 8'd0};
+                if (out_byte_cnt == 4'd1)
+                    out_valid <= 1'b0;
             end
 
-            // Advance to next tag byte only when MCU pulses read_ack
-            // Tag bytes are in nonce_sr (reused as tag shift register)
-            if (tag_phase && tag_byte_cnt > 0 && read_ack) begin
-                tag_byte_cnt <= tag_byte_cnt - 1;
-                if (tag_byte_cnt == 1) tag_phase <= 1'b0;
-                nonce_sr <= {nonce_sr[119:0], 8'd0};
-            end
+            // ============================================================
+            // FSM State Machine
+            // ============================================================
+            case (fsm_state)
 
-            // Process commands
-            case (cmd)
-                2'b01: begin // Load key (16 bytes, MSB first)
-                    key_sr <= {key_sr[119:0], ui_in};
-                    byte_cnt <= byte_cnt + 1;
-                end
+                // ========================================================
+                // IDLE: Accept key/nonce bytes, wait for start pulse.
+                // Commands only accepted when output is fully read.
+                // ========================================================
+                ST_IDLE: begin
+                    busy <= 1'b0;
 
-                2'b10: begin // Load nonce (16 bytes, MSB first)
-                    nonce_sr <= {nonce_sr[119:0], ui_in};
-                    byte_cnt <= byte_cnt + 1;
-                end
+                    if (!out_valid) begin
+                        case (cmd)
+                            2'b01: begin // Load key byte (MSB first)
+                                key_sr <= {key_sr[119:0], ui_in};
+                            end
+                            2'b10: begin // Load nonce byte → x3 (first 8) / x4 (last 8)
+                                if (!byte_cnt[3])
+                                    x3 <= {x3[55:0], ui_in};
+                                else
+                                    x4 <= {x4[55:0], ui_in};
+                                byte_cnt <= byte_cnt + 4'd1;
+                            end
+                            default: begin
+                                byte_cnt <= 4'd0;
+                            end
+                        endcase
 
-                2'b11: begin // Process data (8 bytes per block)
-                    if (!ascon_data_valid) begin
-                        data_sr <= {data_sr[55:0], ui_in};
-                        byte_cnt <= byte_cnt + 1;
-                        if (byte_cnt == 4'd7) begin
-                            ascon_data_valid <= 1'b1;
-                            ascon_data_last  <= data_last;
-                            byte_cnt <= 4'd0;
+                        // Start encryption
+                        if (start_pulse) begin
+                            busy <= 1'b1;
+                            // Initialize Ascon state: IV || K || N (nonce already in x3/x4)
+                            x0 <= IV_ASCON128;
+                            x1 <= key_sr[127:64];
+                            x2 <= key_sr[63:0];
+                            // x3, x4 already loaded with nonce
+                            round_cnt  <= 4'd0;
+                            perm_phase <= 1'b0;
+                            after_perm <= ST_INIT_XOR;
+                            fsm_state  <= ST_PERM;
                         end
                     end
                 end
 
-                default: begin
-                    byte_cnt <= 4'd0;
+                // ========================================================
+                // PERM: 2-phase permutation (S-box then diffusion)
+                // 2 cycles per round. Returns to after_perm when done.
+                // ========================================================
+                ST_PERM: begin
+                    if (!perm_phase) begin
+                        // Phase 0: Substitution
+                        x0 <= s0; x1 <= s1; x2 <= s2; x3 <= s3; x4 <= s4;
+                        perm_phase <= 1'b1;
+                    end else begin
+                        // Phase 1: Diffusion
+                        x0 <= d0; x1 <= d1; x2 <= d2; x3 <= d3; x4 <= d4;
+                        perm_phase <= 1'b0;
+                        if (round_cnt == 4'd11)
+                            fsm_state <= after_perm;
+                        else
+                            round_cnt <= round_cnt + 4'd1;
+                    end
                 end
-            endcase
 
-            // Start pulse (encrypt only)
-            if (start_pulse && !ascon_busy) begin
-                ascon_start_enc <= 1'b1;
-                byte_cnt <= 4'd0;
-            end
+                // ========================================================
+                // INIT_XOR: Post-initialization key XOR + domain separator
+                // ========================================================
+                ST_INIT_XOR: begin
+                    x3 <= x3 ^ key_sr[127:64];
+                    x4 <= x4 ^ key_sr[63:0] ^ 64'd1;  // domain sep: no AD
+                    byte_cnt <= 4'd0;
+                    fsm_state <= ST_WAIT_DATA;
+                end
+
+                // ========================================================
+                // WAIT_DATA: Accept PT bytes from MCU (8 bytes per block)
+                // Only accepts when output has been fully read.
+                // ========================================================
+                ST_WAIT_DATA: begin
+                    if (cmd == 2'b11 && !out_valid) begin
+                        io_sr <= {io_sr[55:0], ui_in};
+                        byte_cnt <= byte_cnt + 4'd1;
+                        if (byte_cnt == 4'd7) begin
+                            last_block <= data_last;
+                            byte_cnt   <= 4'd0;
+                            fsm_state  <= ST_ENCRYPT;
+                        end
+                    end
+                end
+
+                // ========================================================
+                // ENCRYPT: XOR plaintext with x0 to produce ciphertext.
+                // CT stored in io_sr, x0 updated. Output starts.
+                // ========================================================
+                ST_ENCRYPT: begin
+                    io_sr <= x0 ^ io_sr;
+                    x0    <= x0 ^ io_sr;
+                    out_valid    <= 1'b1;
+                    out_byte_cnt <= 4'd8;
+                    fsm_state    <= ST_WAIT_READ;
+                end
+
+                // ========================================================
+                // WAIT_READ: Wait for MCU to read all CT bytes, then:
+                //   - Non-last: run pb6 permutation → WAIT_DATA
+                //   - Last: finalization XOR + pa12 → TAG_HI
+                // ========================================================
+                ST_WAIT_READ: begin
+                    if (!out_valid) begin
+                        if (last_block) begin
+                            // Finalization: XOR key into x1/x2, run pa12
+                            x1 <= x1 ^ key_sr[127:64];
+                            x2 <= x2 ^ key_sr[63:0];
+                            round_cnt  <= 4'd0;
+                            perm_phase <= 1'b0;
+                            after_perm <= ST_TAG_HI;
+                            fsm_state  <= ST_PERM;
+                        end else begin
+                            // Intermediate: run pb6 permutation
+                            round_cnt  <= 4'd6;
+                            perm_phase <= 1'b0;
+                            after_perm <= ST_WAIT_DATA;
+                            fsm_state  <= ST_PERM;
+                        end
+                    end
+                end
+
+                // ========================================================
+                // TAG_HI: Load tag[127:64] into io_sr for MCU to read.
+                // ========================================================
+                ST_TAG_HI: begin
+                    if (!out_valid) begin
+                        io_sr        <= x3 ^ key_sr[127:64];
+                        out_valid    <= 1'b1;
+                        out_byte_cnt <= 4'd8;
+                        fsm_state    <= ST_TAG_LO;
+                    end
+                end
+
+                // ========================================================
+                // TAG_LO: Load tag[63:0] into io_sr for MCU to read.
+                // Returns to IDLE after MCU finishes reading.
+                // ========================================================
+                ST_TAG_LO: begin
+                    if (!out_valid) begin
+                        io_sr        <= x4 ^ key_sr[63:0];
+                        out_valid    <= 1'b1;
+                        out_byte_cnt <= 4'd8;
+                        fsm_state    <= ST_IDLE;
+                    end
+                end
+
+                default: fsm_state <= ST_IDLE;
+            endcase
         end
     end
 
-    // ========================================================================
-    // Output
-    // ========================================================================
-    assign uo_out = tag_phase ? nonce_sr[127:120] :
-                    out_valid ? out_sr[63:56] :
-                    8'd0;
-
-    wire output_valid_flag = out_valid | tag_phase;
-
-    assign uio_out = {6'b000000, output_valid_flag, ascon_busy};
-
     // Suppress unused signal warnings
-    wire _unused = &{ena, uio_in[3], ascon_out_last, 1'b0};
+    wire _unused = &{ena, uio_in[3], uio_in[1:0], 1'b0};
 
 endmodule
