@@ -1,16 +1,18 @@
 // ============================================================================
-// Ascon-128 AEAD Core — Area-Optimized (Inlined Permutation)
+// Ascon-128 AEAD Core — Area-Optimized (2-Phase Permutation)
 // ============================================================================
 // Author: UrbanSense-AI Project
 //
 // Description:
-//   Ascon-128 AEAD with permutation inlined to eliminate register duplication.
-//   Saves ~1,088 FFs vs. separate permutation module.
+//   Ascon-128 AEAD with 2-phase permutation to reduce routing congestion.
+//   Phase 0: Substitution (S-box) — stores intermediate in x0-x4
+//   Phase 1: Linear diffusion — applies rotations to x0-x4
+//   This halves peak combinational wire count vs single-cycle round.
 //
 //   - 128-bit key, 128-bit nonce
 //   - 64-bit rate (8 bytes per block)
-//   - 12 rounds for initialization/finalization (pa)
-//   - 6 rounds for processing (pb)
+//   - 12 rounds for initialization/finalization (pa) = 24 cycles
+//   - 6 rounds for processing (pb) = 12 cycles
 //
 // Ascon-128 Parameters:
 //   IV = 0x80400c0600000000
@@ -68,21 +70,21 @@ module ascon_aead (
     // ========================================================================
 
     localparam [3:0] ST_IDLE       = 4'd0;
-    localparam [3:0] ST_PERM       = 4'd1;  // Generic permutation (replaces 3 states)
+    localparam [3:0] ST_PERM       = 4'd1;  // 2-phase permutation
     localparam [3:0] ST_INIT_XOR   = 4'd2;
     localparam [3:0] ST_PROC_DATA  = 4'd3;
-    localparam [3:0] ST_PROC_OUT   = 4'd4;  // Output pending data before perm
+    localparam [3:0] ST_PROC_OUT   = 4'd4;
     localparam [3:0] ST_FINAL_XOR  = 4'd5;
-    localparam [3:0] ST_FINAL_OUT  = 4'd6;  // Output pending data before final perm
+    localparam [3:0] ST_FINAL_OUT  = 4'd6;
     localparam [3:0] ST_OUTPUT_TAG = 4'd7;
     localparam [3:0] ST_VERIFY_TAG = 4'd8;
 
     reg [3:0] fsm_state;
-    reg [3:0] after_perm;   // Where to go after permutation completes
+    reg [3:0] after_perm;
     reg       is_encrypt;
 
     // ========================================================================
-    // Single 320-bit State (NO duplication!)
+    // Single 320-bit State
     // ========================================================================
 
     reg [63:0] x0, x1, x2, x3, x4;
@@ -90,8 +92,9 @@ module ascon_aead (
     // Saved key for finalization
     reg [127:0] key_reg;
 
-    // Permutation round counter
+    // Permutation round counter + phase
     reg [3:0] round_cnt;
+    reg       perm_phase;  // 0 = S-box, 1 = diffusion
 
     // Data processing
     reg        last_block;
@@ -122,13 +125,13 @@ module ascon_aead (
     end
 
     // ========================================================================
-    // Inline Permutation Round (Combinational)
+    // Phase 0: Substitution Layer (S-box) — Combinational
     // ========================================================================
+    // Input: x0-x4 + round_const
+    // Output: s0-s4 (stored back into x0-x4 at end of phase 0)
 
-    // Add round constant
     wire [63:0] c2 = x2 ^ {56'b0, round_const};
 
-    // Substitution layer (S-box on all 64 bit positions)
     wire [63:0] t0_pre = x0 ^ x4;
     wire [63:0] t1_pre = x1;
     wire [63:0] t2_pre = c2 ^ x1;
@@ -147,15 +150,20 @@ module ascon_aead (
     wire [63:0] s3 = chi3 ^ chi2;
     wire [63:0] s4 = chi4;
 
-    // Linear diffusion layer
-    wire [63:0] round_out_0 = s0 ^ {s0[18:0], s0[63:19]} ^ {s0[27:0], s0[63:28]};
-    wire [63:0] round_out_1 = s1 ^ {s1[60:0], s1[63:61]} ^ {s1[38:0], s1[63:39]};
-    wire [63:0] round_out_2 = s2 ^ {s2[0],    s2[63:1]}  ^ {s2[5:0],  s2[63:6]};
-    wire [63:0] round_out_3 = s3 ^ {s3[9:0],  s3[63:10]} ^ {s3[16:0], s3[63:17]};
-    wire [63:0] round_out_4 = s4 ^ {s4[6:0],  s4[63:7]}  ^ {s4[40:0], s4[63:41]};
+    // ========================================================================
+    // Phase 1: Linear Diffusion Layer — Combinational
+    // ========================================================================
+    // Input: x0-x4 (containing S-box output from phase 0)
+    // Output: d0-d4 (stored back into x0-x4 at end of phase 1)
+
+    wire [63:0] d0 = x0 ^ {x0[18:0], x0[63:19]} ^ {x0[27:0], x0[63:28]};
+    wire [63:0] d1 = x1 ^ {x1[60:0], x1[63:61]} ^ {x1[38:0], x1[63:39]};
+    wire [63:0] d2 = x2 ^ {x2[0],    x2[63:1]}  ^ {x2[5:0],  x2[63:6]};
+    wire [63:0] d3 = x3 ^ {x3[9:0],  x3[63:10]} ^ {x3[16:0], x3[63:17]};
+    wire [63:0] d4 = x4 ^ {x4[6:0],  x4[63:7]}  ^ {x4[40:0], x4[63:41]};
 
     // ========================================================================
-    // Tag output (combinational — no register needed!)
+    // Tag output (combinational)
     // ========================================================================
 
     assign tag_out = {x3 ^ key_reg[127:64], x4 ^ key_reg[63:0]};
@@ -177,6 +185,7 @@ module ascon_aead (
             tag_valid    <= 1'b0;
             auth_fail    <= 1'b0;
             round_cnt    <= 4'd0;
+            perm_phase   <= 1'b0;
             x0 <= 64'd0; x1 <= 64'd0; x2 <= 64'd0; x3 <= 64'd0; x4 <= 64'd0;
             key_reg      <= 128'd0;
             last_block   <= 1'b0;
@@ -207,34 +216,47 @@ module ascon_aead (
                         busy       <= 1'b1;
                         auth_fail  <= 1'b0;
 
-                        // Load initial state: IV || K || N
                         x0 <= IV_ASCON128;
                         x1 <= key[127:64];
                         x2 <= key[63:0];
                         x3 <= nonce[127:64];
                         x4 <= nonce[63:0];
 
-                        // Start pa permutation (12 rounds, start from round 0)
                         round_cnt  <= 4'd0;
+                        perm_phase <= 1'b0;
                         after_perm <= ST_INIT_XOR;
                         fsm_state  <= ST_PERM;
                     end
                 end
 
                 // ============================================================
-                // PERM: Apply one permutation round per clock (generic)
+                // PERM: 2-phase permutation round
+                //   Phase 0: S-box (substitution) → store in x0-x4
+                //   Phase 1: Diffusion (linear) → store in x0-x4, advance round
                 // ============================================================
                 ST_PERM: begin
-                    x0 <= round_out_0;
-                    x1 <= round_out_1;
-                    x2 <= round_out_2;
-                    x3 <= round_out_3;
-                    x4 <= round_out_4;
-
-                    if (round_cnt == 4'd11) begin
-                        fsm_state <= after_perm;
+                    if (perm_phase == 1'b0) begin
+                        // Phase 0: Substitution
+                        x0 <= s0;
+                        x1 <= s1;
+                        x2 <= s2;
+                        x3 <= s3;
+                        x4 <= s4;
+                        perm_phase <= 1'b1;
                     end else begin
-                        round_cnt <= round_cnt + 1;
+                        // Phase 1: Diffusion
+                        x0 <= d0;
+                        x1 <= d1;
+                        x2 <= d2;
+                        x3 <= d3;
+                        x4 <= d4;
+                        perm_phase <= 1'b0;
+
+                        if (round_cnt == 4'd11) begin
+                            fsm_state <= after_perm;
+                        end else begin
+                            round_cnt <= round_cnt + 1;
+                        end
                     end
                 end
 
@@ -243,7 +265,6 @@ module ascon_aead (
                 // ============================================================
                 ST_INIT_XOR: begin
                     x3 <= x3 ^ key_reg[127:64];
-                    // Domain separator: x4 ^= K1 ^ 1 (no AD)
                     x4 <= x4 ^ key_reg[63:0] ^ 64'd1;
                     s_axis_tready <= 1'b1;
                     last_block <= 1'b0;
@@ -254,7 +275,6 @@ module ascon_aead (
                 // PROC_DATA: Process plaintext/ciphertext blocks
                 // ============================================================
                 ST_PROC_DATA: begin
-                    // Re-assert tready when entering from permutation
                     if (!s_axis_tready && !output_pending)
                         s_axis_tready <= 1'b1;
 
@@ -279,7 +299,6 @@ module ascon_aead (
                         end
                     end
 
-                    // Output pending data
                     if (output_pending && (!m_axis_tvalid || m_axis_tready)) begin
                         m_axis_tdata  <= pending_output;
                         m_axis_tvalid <= 1'b1;
@@ -300,8 +319,8 @@ module ascon_aead (
                     end
 
                     if (!output_pending) begin
-                        // Start pb permutation (6 rounds, start from round 6)
                         round_cnt  <= 4'd6;
+                        perm_phase <= 1'b0;
                         after_perm <= ST_PROC_DATA;
                         fsm_state  <= ST_PERM;
                     end
@@ -330,14 +349,14 @@ module ascon_aead (
                     x1 <= x1 ^ key_reg[127:64];
                     x2 <= x2 ^ key_reg[63:0];
 
-                    // Start pa permutation (12 rounds)
-                    round_cnt <= 4'd0;
+                    round_cnt  <= 4'd0;
+                    perm_phase <= 1'b0;
                     after_perm <= is_encrypt ? ST_OUTPUT_TAG : ST_VERIFY_TAG;
-                    fsm_state <= ST_PERM;
+                    fsm_state  <= ST_PERM;
                 end
 
                 // ============================================================
-                // OUTPUT_TAG: Signal tag valid (tag_out is combinational)
+                // OUTPUT_TAG: Signal tag valid
                 // ============================================================
                 ST_OUTPUT_TAG: begin
                     tag_valid <= 1'b1;
