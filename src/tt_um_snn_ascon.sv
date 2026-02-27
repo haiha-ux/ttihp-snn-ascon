@@ -90,6 +90,7 @@ module tt_um_snn_ascon (
     reg [127:0] tag_sr;
     reg [4:0]   tag_byte_cnt;
     reg         tag_phase;
+    reg         tag_pending;  // Tag captured but waiting for CT output to finish
 
     ascon_aead u_ascon (
         .clk(clk),
@@ -133,6 +134,7 @@ module tt_um_snn_ascon (
             tag_sr          <= 128'd0;
             tag_byte_cnt    <= 5'd0;
             tag_phase       <= 1'b0;
+            tag_pending     <= 1'b0;
         end else begin
             // Clear single-cycle pulses
             ascon_start_enc <= 1'b0;
@@ -144,11 +146,20 @@ module tt_um_snn_ascon (
                 ascon_data_last  <= 1'b0;
             end
 
-            // Capture tag when valid
+            // Capture tag when valid (defer output until CT is done)
             if (ascon_tag_valid) begin
                 tag_sr <= ascon_tag_out;
                 tag_byte_cnt <= 5'd16;
+                if (!out_valid)
+                    tag_phase <= 1'b1;
+                else
+                    tag_pending <= 1'b1;
+            end
+
+            // Start tag output once CT output is fully read
+            if (tag_pending && !out_valid) begin
                 tag_phase <= 1'b1;
+                tag_pending <= 1'b0;
             end
 
             // Output serialization: capture 64-bit output (hold until MCU reads)
@@ -162,7 +173,7 @@ module tt_um_snn_ascon (
             end
 
             // Advance to next output byte only when MCU pulses read_ack
-            if (out_valid && out_byte_cnt > 0 && read_ack) begin
+            if (out_valid && out_byte_cnt > 0 && read_ack && !tag_phase) begin
                 out_byte_cnt <= out_byte_cnt - 1;
                 if (out_byte_cnt == 1) out_valid <= 1'b0;
                 out_sr <= {out_sr[55:0], 8'd0};
