@@ -1,41 +1,37 @@
 ![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
 
-# SNN Motion Detector + Ascon-128 AEAD
+# Ascon-128 AEAD — NIST Lightweight Cryptography on Silicon
 
 - [Read the documentation for project](docs/info.md)
 
 ## Overview
 
-Neuromorphic motion detection with NIST Ascon-128 authenticated encryption for secure IoT edge sensing. Part of the UrbanSense-AI multi-paradigm neural processing SoC project.
+Hardware implementation of the NIST-standardized Ascon-128 authenticated encryption (AEAD) algorithm on IHP SG13G2 130nm silicon. Part of the UrbanSense-AI project for secure IoT edge sensing.
 
 **Target:** TinyTapeout IHP 26a (IHP SG13G2 130nm)
-**Tiles:** 8x2 (16 tiles, ~15K cells)
+**Tiles:** 4x2 (~6K cells)
+**Clock:** 50 MHz
 
-## Modules
+## Features
 
-### SNN Motion Detector (Mode 0)
-- Leaky Integrate-and-Fire (LIF) neurons for event-driven motion detection
-- 16x16 pixel input, 4x4 spatial grid aggregation
-- Outputs: motion_detected flag + motion_intensity[7:0]
-
-### Ascon-128 AEAD (Mode 1)
-- NIST Lightweight Cryptography standard (2023)
+- NIST Ascon-128 AEAD: encryption + authentication in one operation
 - 128-bit key, 128-bit nonce, 64-bit data blocks
-- Authenticated encryption and decryption with 128-bit tag
+- 128-bit authentication tag
+- Serial 8-bit I/O interface (no wide buses needed)
+- Zero DSP blocks — pure digital logic
 
 ## Pin Mapping
 
 | Pin | Direction | Function |
 |-----|-----------|----------|
-| `ui_in[7:0]` | Input | Data (pixel or crypto) |
-| `uo_out[7:0]` | Output | Result (motion info or ciphertext) |
-| `uio[7]` | Input | Mode: 0=SNN, 1=Ascon |
-| `uio[6:5]` | Input | Command |
-| `uio[4]` | Input | Data last (Ascon) |
-| `uio[3]` | Input | Start (Ascon) |
-| `uio[2]` | Input | Decrypt select |
+| `ui_in[7:0]` | Input | Data (key/nonce/plaintext bytes) |
+| `uo_out[7:0]` | Output | Result (ciphertext/tag bytes) |
+| `uio[7:6]` | Input | CMD: 00=idle, 01=load_key, 10=load_nonce, 11=process |
+| `uio[5]` | Input | Data last (marks final block) |
+| `uio[4]` | Input | Start pulse |
+| `uio[3]` | Input | Decrypt select (0=encrypt, 1=decrypt) |
 | `uio[1]` | Output | Output valid |
-| `uio[0]` | Output | Status |
+| `uio[0]` | Output | Busy |
 
 ## What is Tiny Tapeout?
 
