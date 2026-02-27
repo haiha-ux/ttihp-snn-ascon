@@ -54,8 +54,6 @@ module motion_detector #(
 
     localparam FRAME_SIZE = IMG_WIDTH * IMG_HEIGHT;
     localparam GRID_CELLS = GRID_SIZE * GRID_SIZE;
-    localparam PIXELS_PER_GRID = (IMG_WIDTH / GRID_SIZE) * (IMG_HEIGHT / GRID_SIZE);
-
     // ========================================================================
     // Frame Buffer (stores previous frame)
     // ========================================================================
@@ -141,12 +139,12 @@ module motion_detector #(
 
             // Initialize grid event counters
             for (int i = 0; i < GRID_CELLS; i++) begin
-                grid_event_cnt[i] = '0;
+                grid_event_cnt[i] <= '0;
             end
 
             // Initialize frame buffer to zero
             for (int i = 0; i < FRAME_SIZE; i++) begin
-                prev_frame[i] = '0;
+                prev_frame[i] <= '0;
             end
 
         end else begin

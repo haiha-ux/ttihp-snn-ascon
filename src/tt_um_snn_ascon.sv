@@ -272,4 +272,7 @@ module tt_um_snn_ascon (
 
     assign uio_out = {6'b000000, output_valid_flag, status_flag};
 
+    // Suppress unused signal warnings
+    wire _unused = &{ena, ascon_auth_fail, ascon_out_last, 1'b0};
+
 endmodule
