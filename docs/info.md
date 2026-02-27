@@ -28,13 +28,19 @@ This is part of the **UrbanSense-AI** project — a multi-paradigm neural proces
 1. Load 128-bit key: send 16 bytes on `ui_in` with `cmd=01` (`uio[7:6]=01`), MSB first
 2. Load 128-bit nonce: send 16 bytes with `cmd=10` (`uio[7:6]=10`), MSB first
 3. Pulse start: set `uio[4]=1` for one clock cycle (with `uio[3]=0` for encrypt)
-4. Wait ~50 clock cycles for initialization
+4. Wait for `busy` (`uio[0]`) to assert, then wait ~50 clock cycles for initialization
 5. Send plaintext: 8 bytes per block with `cmd=11` (`uio[7:6]=11`). Set `uio[5]=1` on the last byte of the last block
-6. Read ciphertext on `uo_out` when `uio[1]=1` (output_valid)
-7. Read 16-byte authentication tag on `uo_out` when `uio[1]=1` after data completes
+6. Poll `output_valid` (`uio[1]`). When high, read `uo_out`, then pulse `read_ack` (`uio[2]=1`) for one cycle to advance to next byte
+7. Repeat step 6 for all 8 ciphertext bytes + 16 tag bytes (24 bytes total)
 
 ### Decryption
 Same as encryption but set `uio[3]=1` when pulsing start. Send ciphertext instead of plaintext. Output will be decrypted plaintext.
+
+### Output Handshake
+The design uses a **read_ack handshake** so the MCU can read at its own pace:
+- Output byte is held on `uo_out` until MCU pulses `read_ack`
+- MCU can take as many clock cycles as needed between reads
+- This enables reliable operation with RP2040 GPIO bit-banging
 
 ## External hardware
 

@@ -5,7 +5,7 @@ project:
   discord:      ""
   description:  "Neuromorphic motion detection with NIST Ascon-128 authenticated encryption for secure IoT edge sensing"
   language:     "SystemVerilog"
-  clock_hz:     50000000       # 50 MHz
+  clock_hz:     20000000       # 20 MHz (config.json CLOCK_PERIOD=50ns)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
   tiles: "8x2"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
@@ -47,7 +47,7 @@ pinout:
   # Bidirectional pins
   uio[0]: "busy (output)"
   uio[1]: "output_valid (output)"
-  uio[2]: ""
+  uio[2]: "read_ack"
   uio[3]: "decrypt_sel"
   uio[4]: "start_pulse"
   uio[5]: "data_last"

@@ -97,7 +97,7 @@ async def test_ascon_encrypt(dut):
 
 @cocotb.test()
 async def test_ascon_output(dut):
-    """Test Ascon-128: verify output data appears."""
+    """Test Ascon-128: verify output data with read_ack handshake."""
     dut._log.info("Start Ascon output test")
 
     clock = Clock(dut.clk, 20, unit="ns")
@@ -142,19 +142,23 @@ async def test_ascon_output(dut):
 
     dut.uio_in.value = 0
 
-    # Wait and collect output
+    # Wait and collect output using read_ack handshake
     output_bytes = []
-    for cycle in range(300):
+    for cycle in range(500):
         await ClockCycles(dut.clk, 1)
         out_valid = (dut.uio_out.value.integer >> 1) & 0x01
         if out_valid:
             output_bytes.append(dut.uo_out.value.integer)
+            # Pulse read_ack (uio_in[2]) to advance to next byte
+            dut.uio_in.value = 0b00_0_0_0_100  # read_ack=1
+            await ClockCycles(dut.clk, 1)
+            dut.uio_in.value = 0  # clear read_ack
 
     dut._log.info(f"Collected {len(output_bytes)} output bytes")
     dut._log.info(f"Output: {[hex(b) for b in output_bytes[:24]]}")
 
-    # Ascon with all-zero key/nonce/plaintext should produce non-zero ciphertext+tag
-    assert len(output_bytes) > 0, "Should produce output bytes"
+    # 8 ciphertext bytes + 16 tag bytes = 24 total
+    assert len(output_bytes) >= 8, f"Should produce at least 8 output bytes, got {len(output_bytes)}"
     assert any(b != 0 for b in output_bytes), "Output should be non-zero (encrypted)"
 
     dut._log.info("Ascon output test PASSED")

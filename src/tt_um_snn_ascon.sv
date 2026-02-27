@@ -15,8 +15,8 @@
 //   uio[5]       = DATA_LAST (input): marks last data block
 //   uio[4]       = START (input): pulse to start encrypt/decrypt
 //   uio[3]       = DECRYPT (input): 0=encrypt, 1=decrypt
-//   uio[2]       = unused input
-//   uio[1]       = OUTPUT_VALID (output): data output ready
+//   uio[2]       = READ_ACK (input): pulse to advance to next output byte
+//   uio[1]       = OUTPUT_VALID (output): data output ready to read
 //   uio[0]       = BUSY (output): Ascon is processing
 //
 // Protocol:
@@ -24,8 +24,8 @@
 //   2. Load 128-bit nonce: 16 bytes with cmd=10, MSB first
 //   3. Pulse start (uio[4]=1) for 1 cycle
 //   4. Process data: send 8-byte blocks with cmd=11, set data_last on final
-//   5. Read output on uo_out when output_valid=1
-//   6. Read 16-byte tag after processing completes
+//   5. Poll output_valid (uio[1]). When high, read uo_out, pulse read_ack (uio[2])
+//   6. Repeat step 5 for all ciphertext bytes + 16 tag bytes
 // ============================================================================
 
 `default_nettype none
@@ -49,6 +49,7 @@ module tt_um_snn_ascon (
     wire       data_last  = uio_in[5];   // Last data block
     wire       start_pulse= uio_in[4];   // Start encrypt/decrypt
     wire       decrypt_sel= uio_in[3];   // 0=encrypt, 1=decrypt
+    wire       read_ack   = uio_in[2];   // MCU pulses to read next output byte
 
     // uio direction: [7:2]=input, [1:0]=output
     assign uio_oe = 8'b0000_0011;
@@ -150,7 +151,7 @@ module tt_um_snn_ascon (
                 tag_phase <= 1'b1;
             end
 
-            // Output serialization: capture 64-bit output
+            // Output serialization: capture 64-bit output (hold until MCU reads)
             if (ascon_out_valid && !out_valid && !tag_phase) begin
                 out_sr <= ascon_out_data;
                 out_byte_cnt <= 4'd8;
@@ -160,15 +161,15 @@ module tt_um_snn_ascon (
                 ascon_out_ready <= 1'b0;
             end
 
-            // Shift out output bytes (one per clock)
-            if (out_valid && out_byte_cnt > 0) begin
+            // Advance to next output byte only when MCU pulses read_ack
+            if (out_valid && out_byte_cnt > 0 && read_ack) begin
                 out_byte_cnt <= out_byte_cnt - 1;
                 if (out_byte_cnt == 1) out_valid <= 1'b0;
                 out_sr <= {out_sr[55:0], 8'd0};
             end
 
-            // Shift out tag bytes (one per clock)
-            if (tag_phase && tag_byte_cnt > 0) begin
+            // Advance to next tag byte only when MCU pulses read_ack
+            if (tag_phase && tag_byte_cnt > 0 && read_ack) begin
                 tag_byte_cnt <= tag_byte_cnt - 1;
                 if (tag_byte_cnt == 1) tag_phase <= 1'b0;
                 tag_sr <= {tag_sr[119:0], 8'd0};
@@ -226,6 +227,6 @@ module tt_um_snn_ascon (
     assign uio_out = {6'b000000, output_valid_flag, ascon_busy};
 
     // Suppress unused signal warnings
-    wire _unused = &{ena, ascon_auth_fail, ascon_out_last, uio_in[2], 1'b0};
+    wire _unused = &{ena, ascon_auth_fail, ascon_out_last, 1'b0};
 
 endmodule

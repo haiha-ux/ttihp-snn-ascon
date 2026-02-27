@@ -10,7 +10,7 @@ Hardware implementation of the NIST-standardized Ascon-128 authenticated encrypt
 
 **Target:** TinyTapeout IHP 26a (IHP SG13G2 130nm)
 **Tiles:** 4x2 (~6K cells)
-**Clock:** 50 MHz
+**Clock:** 20 MHz
 
 ## Features
 
@@ -30,7 +30,8 @@ Hardware implementation of the NIST-standardized Ascon-128 authenticated encrypt
 | `uio[5]` | Input | Data last (marks final block) |
 | `uio[4]` | Input | Start pulse |
 | `uio[3]` | Input | Decrypt select (0=encrypt, 1=decrypt) |
-| `uio[1]` | Output | Output valid |
+| `uio[2]` | Input | Read acknowledge (pulse to get next output byte) |
+| `uio[1]` | Output | Output valid (byte ready on uo_out) |
 | `uio[0]` | Output | Busy |
 
 ## What is Tiny Tapeout?
